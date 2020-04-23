@@ -3,6 +3,7 @@
   (:require
     [clojure.spec.alpha :as s]
     [clojure.set :as set]
+    [com.fulcrologic.rad.type-support.cache-a-bools :as cb]
     [clojure.string :as str]
     [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
     [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
@@ -18,7 +19,7 @@
     [com.fulcrologic.rad.control :as control]
     [com.fulcrologic.rad.errors :refer [required!]]
     [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.attributes :as attr]
+    [com.fulcrologic.rad.authorization :as auth]
     [com.fulcrologic.rad.application :as rapp]
     [com.fulcrologic.rad.ids :as ids :refer [new-uuid]]
     [com.fulcrologic.rad.type-support.integer :as int]
@@ -48,37 +49,37 @@
 (def standard-controls
   "The default value of ::control/controls for forms. Includes a ::done, ::undo, and ::save button."
   {::done {:type   :button
-                                :label  (fn [this]
-                                          (let [props           (comp/props this)
-                                                read-only-form? (?! (comp/component-options this ::read-only?) this)
-                                                dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
-                                            (if dirty? "Cancel" "Done")))
-                                :class  (fn [this]
-                                          (let [props  (comp/props this)
-                                                dirty? (or (:ui/new? props) (fs/dirty? props))]
-                                            (if dirty? "negative" "positive")))
-                                :action (fn [this] (cancel! {::master-form this}))}
-                        ::undo {:type      :button
-                                :disabled? (fn [this]
-                                             (let [props           (comp/props this)
-                                                   read-only-form? (?! (comp/component-options this ::read-only?) this)
-                                                   dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
-                                               (not dirty?)))
-                                :label     "Undo"
-                                :action    (fn [this] (undo-all! {::master-form this}))}
-                        ::save {:type      :button
-                                :disabled? (fn [this]
-                                             (let [props           (comp/props this)
-                                                   read-only-form? (?! (comp/component-options this ::read-only?) this)
-                                                   remote-busy?    (seq (::app/active-remotes props))
-                                                   dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
-                                               (or (not dirty?) remote-busy?)))
-                                :label     "Save"
-                                :class     (fn [this]
-                                             (let [props        (comp/props this)
-                                                   remote-busy? (seq (::app/active-remotes props))]
-                                               (when remote-busy? "loading")))
-                                :action    (fn [this] (save! {::master-form this}))}})
+           :label  (fn [this]
+                     (let [props           (comp/props this)
+                           read-only-form? (?! (comp/component-options this ::read-only?) this)
+                           dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
+                       (if dirty? "Cancel" "Done")))
+           :class  (fn [this]
+                     (let [props  (comp/props this)
+                           dirty? (or (:ui/new? props) (fs/dirty? props))]
+                       (if dirty? "negative" "positive")))
+           :action (fn [this] (cancel! {::master-form this}))}
+   ::undo {:type      :button
+           :disabled? (fn [this]
+                        (let [props           (comp/props this)
+                              read-only-form? (?! (comp/component-options this ::read-only?) this)
+                              dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
+                          (not dirty?)))
+           :label     "Undo"
+           :action    (fn [this] (undo-all! {::master-form this}))}
+   ::save {:type      :button
+           :disabled? (fn [this]
+                        (let [props           (comp/props this)
+                              read-only-form? (?! (comp/component-options this ::read-only?) this)
+                              remote-busy?    (seq (::app/active-remotes props))
+                              dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
+                          (or (not dirty?) remote-busy?)))
+           :label     "Save"
+           :class     (fn [this]
+                        (let [props        (comp/props this)
+                              remote-busy? (seq (::app/active-remotes props))]
+                          (when remote-busy? "loading")))
+           :action    (fn [this] (save! {::master-form this}))}})
 
 
 (>def ::form-env map?)
@@ -332,7 +333,7 @@
         read-only? (?! (comp/component-options this ::read-only?) this)
         abandoned? (not= :state/editing (uism/get-active-state this id))
         dirty?     (and (not abandoned?) (fs/dirty? form-props))]
-    (log/spy :info (or read-only? (not dirty?)))))
+    (or read-only? (not dirty?))))
 
 (defn form-pre-merge
   "Generate a pre-merge for a component that has the given for attribute map. Returns a proper
@@ -683,7 +684,7 @@
         FormClass        (uism/actor-class uism-env :actor/form)
         form-ident       (uism/actor->ident uism-env :actor/form)
         id               (second form-ident)
-        initial-state    (deep-merge (default-state FormClass id) form-overrides)
+        initial-state    (merge (default-state FormClass id) form-overrides)
         entity-to-merge  (fs/add-form-config FormClass initial-state)
         initialized-keys (all-keys initial-state)]
     (-> uism-env
@@ -695,14 +696,16 @@
 
 (defn exit-form
   "Discard all changes, and attempt to change route. Exits the state machine (cleaning it up) if the new route takes effect."
-  [uism-env]
+  [{::uism/keys [fulcro-app] :as uism-env}]
   (let [Form         (uism/actor-class uism-env :actor/form)
         cancel-route (some-> Form comp/component-options ::cancel-route)]
     (let [form-ident (uism/actor->ident uism-env :actor/form)]
+      (when (history/history-support? fulcro-app)
+        (history/back! fulcro-app))
       (-> uism-env
         (uism/apply-action fs/pristine->entity* form-ident)
         (uism/activate :state/abandoned)
-        (uism/set-timeout :cleanup :event/exit {::new-route (or cancel-route :back)} 1)))))
+        (uism/set-timeout :cleanup :event/exit {} 1)))))
 
 (>defn calc-diff
   "Calculates the minimal form diff from the UISM env of the master form's state machine."
@@ -717,14 +720,7 @@
 
 (def global-events
   {:event/exit
-   {::uism/handler (fn [{::uism/keys [event-data fulcro-app] :as env}]
-                     (let [route (::new-route event-data)]
-                       (cond
-                         (and (= :back route) (history/history-support? fulcro-app)) (history/back! fulcro-app)
-                         (and (nil? route) (history/history-support? fulcro-app)) (history/back! fulcro-app)
-                         (vector? route) (dr/change-route! fulcro-app route))
-                       (uism/exit env)))}
-
+   {::uism/handler (fn [env] (uism/exit env))}
    :event/route-denied
    {::uism/handler (fn [env] env)}})
 
@@ -997,7 +993,7 @@
   (let [asm-id (comp/get-ident master-form)]
     (uism/trigger! master-form asm-id :event/delete-row env)))
 
-(>defn read-only?
+(defn read-only?
   "Returns true if the given attribute is meant to show up as read only on the given form instance. Attributes
   configure this by placing a boolean value (or function returning boolean) on the attribute at `::attr/read-only?`.
 
@@ -1012,20 +1008,27 @@
   as you'd expect."
   [form-instance {::attr/keys [qualified-key identity? read-only? computed-value] :as attr}]
   [comp/component? ::attr/attribute => boolean?]
-  (let [{::keys          [read-only-fields]
-         read-only-form? ::read-only?} (comp/component-options form-instance)
-        master-form       (comp/get-computed form-instance ::master-form)
-        master-read-only? (some-> master-form (comp/component-options ::read-only?))]
-    (boolean
-      (or
-        (?! read-only-form? form-instance)
-        (?! master-read-only? master-form)
-        identity?
-        (?! read-only? form-instance attr)
-        computed-value
-        (and (set? (?! read-only-fields form-instance)) (contains? read-only-fields qualified-key))))))
+  (cb/as-boolean
+    (cb/with-app-cache form-instance [::read-only? qualified-key]
+      (let [{::keys          [read-only-fields]
+             read-only-form? ::read-only?} (comp/component-options form-instance)
+            master-form       (comp/get-computed form-instance ::master-form)
+            master-read-only? (some-> master-form (comp/component-options ::read-only?))]
+        (cb/Or
+          (cb/Cnil (?! read-only-form? form-instance))
+          (cb/Cnil (?! master-read-only? master-form))
+          (and identity? cb/CT)
+          (cb/Cnil (?! read-only? form-instance attr))
+          (cb/Cnil computed-value)
+          (cb/Or
+            (cb/Not (cb/Cnil? read-only-fields))
+            (and (set? (?! read-only-fields form-instance)) (contains? read-only-fields qualified-key)))
+          ;; These answers need to be cached in a very fast way
+          (cb/Not (auth/can? form-instance {::auth/context form-instance
+                                            ::auth/subject `save-form
+                                            ::auth/action  :execute})))))))
 
-(>defn field-visible?
+(defn field-visible?
   "Should the `attr` on the given `form-instance` be visible? This is controlled:
 
   * On the attribute at `::form/field-visible?`. A boolean or `(fn [form-instance attr] boolean?)`
@@ -1037,13 +1040,17 @@
   [form-instance {::keys      [field-visible?]
                   ::attr/keys [qualified-key] :as attr}]
   [comp/component? ::attr/attribute => boolean?]
-  (let [form-field-visible? (?! (comp/component-options form-instance ::fields-visible? qualified-key) form-instance attr)
-        field-visible?      (?! field-visible? form-instance attr)]
-    (boolean
-      (or
-        (true? form-field-visible?)
-        (and (nil? form-field-visible?) (true? field-visible?))
-        (and (nil? form-field-visible?) (nil? field-visible?))))))
+  (cb/as-boolean
+    (cb/with-app-cache form-instance [::field-visible? qualified-key]
+      (let [form-field-visible? (?! (comp/component-options form-instance ::fields-visible? qualified-key) form-instance attr)
+            field-visible?      (?! field-visible? form-instance attr)
+            answer              (cb/And
+                                  (auth/can? form-instance (auth/Read qualified-key {::form-instance form-instance}))
+                                  (cb/Or
+                                    form-field-visible?
+                                    (cb/And (cb/Cnil? form-field-visible?) field-visible?)
+                                    (cb/And (cb/Cnil? form-field-visible?) (cb/Cnil? field-visible?))))]
+        answer))))
 
 (defn view!
   "Route to the given form in read-only mode."
@@ -1242,5 +1249,5 @@
           [save-form delete-entity]))
 
 (comment
-  (opts/resolve-key {} `com.fulcrologic.rad.form-options/field-options)
-  )
+  (opts/resolve-key {} `com.fulcrologic.rad.form-options/field-options))
+

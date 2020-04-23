@@ -102,12 +102,16 @@
   [uism-env & k-or-ks]
   (apply comp/component-options (uism/actor-class uism-env :actor/report) k-or-ks))
 
+(defn initial-sort-params-with-defaults
+  [env]
+  (merge {:ascending? true} (report-options env ::initial-sort-params)))
+
 (defn initialize-parameters [{::uism/keys [fulcro-app] :as env}]
   (let [report-ident        (uism/actor->ident env :actor/report)
         path                (conj report-ident :ui/parameters)
         {history-params :params} (history/current-route fulcro-app)
         controls            (report-options env :com.fulcrologic.rad.control/controls)
-        initial-sort-params (or (report-options env ::initial-sort-params) {})
+        initial-sort-params (initial-sort-params-with-defaults env)
         initial-parameters  (reduce-kv
                               (fn [result control-key {:keys [default-value]}]
                                 (if default-value
@@ -210,7 +214,7 @@
    {:parameters    [:actor/report :ui/parameters]
     :sort-params   [:actor/report :ui/parameters ::sort]
     :sort-by       [:actor/report :ui/parameters ::sort :sort-by]
-    :forward?      [:actor/report :ui/parameters ::sort :forward?]
+    :ascending?    [:actor/report :ui/parameters ::sort :ascending?]
     :filtered-rows [:actor/report :ui/cache :filtered-rows]
     :sorted-rows   [:actor/report :ui/cache :sorted-rows]
     :raw-rows      [:actor/report :ui/loaded-data]
@@ -269,17 +273,17 @@
         :event/do-sort           {::uism/handler (fn [{::uism/keys [event-data fulcro-app] :as env}]
                                                    (if-let [{::attr/keys [qualified-key]} (get event-data ::attr/attribute)]
                                                      (let [sort-by  (uism/alias-value env :sort-by)
-                                                           forward? (uism/alias-value env :forward?)
-                                                           forward? (if (= qualified-key sort-by)
-                                                                      (not forward?)
+                                                           ascending? (uism/alias-value env :ascending?)
+                                                           ascending? (if (= qualified-key sort-by)
+                                                                      (not ascending?)
                                                                       true)]
-                                                       (rad-routing/update-route-params! fulcro-app update ::sort merge {:forward? forward?
+                                                       (rad-routing/update-route-params! fulcro-app update ::sort merge {:ascending? ascending?
                                                                                                                          :sort-by  qualified-key})
                                                        (-> env
                                                          (uism/assoc-aliased
                                                            :busy? false
                                                            :sort-by qualified-key
-                                                           :forward? forward?)
+                                                           :ascending? ascending?)
                                                          (sort-rows)
                                                          (populate-current-page)))
                                                      env))}
@@ -313,7 +317,7 @@
                                           {:keys [params]} event-data
                                           path                (conj report-ident :ui/parameters)
                                           controls            (report-options env :com.fulcrologic.rad.control/controls)
-                                          initial-sort-params (or (report-options env ::initial-sort-params) {})
+                                          initial-sort-params (initial-sort-params-with-defaults env)
                                           initial-parameters  (reduce-kv
                                                                 (fn [result control-key {:keys [default-value]}]
                                                                   (if default-value
@@ -455,6 +459,8 @@
                               [`(comp/defsc ~sym ~arglist ~options ~@body)])]
          `(do
             ~@defs)))))
+
+#?(:clj (s/fdef defsc-report :args ::comp/args))
 
 (def reload!
   "[report-instance]

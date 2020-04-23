@@ -69,7 +69,7 @@
 
    An attribute-level key that can be used on an attribute to define the default visibility for an attribute on
    forms.  Forms may override the attribute-specific key with `fields-visible?`."
-  :com.fulcrologic.rad.form/fields-visible?)
+  :com.fulcrologic.rad.form/field-visible?)
 
 (def fields-visible?
   "OPTIONAL: A map from *qualified keyword* to a boolean or a `(fn [this])`. Makes fields statically or dynamically
@@ -194,3 +194,16 @@
   documentation for more details.
   "
   :com.fulcrologic.rad.form/triggers)
+
+(def enumerated-labels
+  "A map from qualified key of a form field to the string to use for it. May be a `(fn [] string?)` (e.g. for i18n).
+   Overrides ::attr/enumerated-labels."
+  :com.fulcrologic.rad.form/enumerated-labels)
+
+(def field-label
+  "ATTRIBUTE OPTION. String or `(fn [form-instance] string-or-element)`. Rendering plugins may require a string return
+  value.
+
+  Placing this on an attribute indicates a default for the label for the attribute on forms. The default is a
+  capitalized version of the attribute's key. See also `field-labels`."
+  :com.fulcrologic.rad.form/field-label)
