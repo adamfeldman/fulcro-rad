@@ -6,7 +6,9 @@
     #?(:cljs [goog.object :as gobj])
     [com.fulcrologic.guardrails.core :refer [>defn => ?]]
     [com.fulcrologic.rad.routing :as routing]
+    [com.fulcrologic.rad.authorization :as auth]
     [com.fulcrologic.fulcro.routing.dynamic-routing :as dr]
+    [com.fulcrologic.fulcro.mutations :as m]
     [com.fulcrologic.fulcro.algorithms.do-not-use :refer [base64-encode base64-decode]]
     [com.fulcrologic.rad.routing.history :as history :refer [RouteHistory]]
     [clojure.string :as str]
@@ -63,6 +65,24 @@
       (map (fn [[k v]]
              (str (encode-uri-component (name k)) "=" (encode-uri-component (str v)))) string-key-values))))
 
+(defn url->route
+  "Convert the current browser URL into a route path and parameter map. Returns:
+
+   ```
+   {:route [\"path\" \"segment\"]
+    :params {:param value}}
+   ```
+
+   You can save this value and later use it with `apply-route!`.
+  "
+  []
+  #?(:cljs
+     (let [path   (.. js/document -location -pathname)
+           route  (vec (drop 1 (str/split path #"/")))
+           params (or (some-> (.. js/document -location -search) (query-params)) {})]
+       {:route  route
+        :params params})))
+
 (defrecord HTML5History [listeners generator current-uid prior-route]
   RouteHistory
   (-push-route! [this route params]
@@ -104,22 +124,6 @@
          {:route  route
           :params params}))))
 
-(defn url->route
-  "Convert the current URI into a route path and parameter map. Returns:
-
-   ```
-   {:route [\"path\" \"segment\"]
-    :params {:param value}}
-   ```
-  "
-  []
-  #?(:cljs
-     (let [path   (.. js/document -location -pathname)
-           route  (vec (drop 1 (str/split path #"/")))
-           params (or (some-> (.. js/document -location -search) (query-params)) {})]
-       {:route  route
-        :params params})))
-
 (defn html5-history
   "Create a new instance of a RouteHistory object that is properly configured against the browser's HTML5 History API."
   []
@@ -141,13 +145,26 @@
        (catch :default e
          (log/error e "Unable to create HTML5 history.")))))
 
+(defn apply-route!
+  "Apply the given route and params to the URL and routing system. `saved-route` is in the format of
+   the return value of `url->route`. Returns true if it is able to route there."
+  [app {:keys [route params] :as saved-route}]
+  (if-let [target (dr/resolve-target app route)]
+    (do
+      (routing/route-to! app target params)
+      true)
+    (do
+      (log/error "Saved route did not resolve to a UI target" saved-route)
+      false)))
+
 (defn restore-route!
   "Attempt to restore the route given in the URL. If that fails, simply route to the default given (a class and map).
 
    WARNING: This should not be called until the HTML5 history is installed in your app."
   [app default-page default-params]
-  (let [this (history/active-history app)
-        {:keys [route params]} (url->route)]
-    (if (and this (seq route))
-      (dr/change-route! app route params)
+  (let [this      (history/active-history app)
+        url-route (url->route)]
+    (if (and this (seq (:route url-route)))
+      (when-not (apply-route! app url-route)
+        (routing/route-to! app default-page default-params))
       (routing/route-to! app default-page default-params))))

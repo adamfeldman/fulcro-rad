@@ -21,6 +21,7 @@
 (>def ::attribute (s/keys :req [::type ::qualified-key]
                     :opt [::target]))
 (>def ::attributes (s/every ::attribute))
+(>def ::attribute-map (s/map-of keyword? ::attribute))
 
 (>defn new-attribute
   "Create a new attribute, which is represented as an Attribute record.
@@ -49,7 +50,7 @@
       (assoc ::qualified-key kw))))
 
 #?(:clj
-   (defmacro ^{:arglists '[[symbol qualified-keyword data-type options-map]]} defattr
+   (defmacro ^{:arglists '[[symbol docstring? qualified-keyword data-type options-map]]} defattr
      "Define a new attribute into a sym.
 
      WARNING: IF YOU ARE DOING FULL-STACK, THEN THESE MUST BE DEFINED IN CLJC FILES FOR RAD TO WORK! RAD actually supports
@@ -178,7 +179,7 @@
 (>defn attribute-map
   "Returns a map of qualified key -> attribute for the given attributes"
   [attributes]
-  [::attributes => (s/map-of qualified-keyword? ::attribute)]
+  [::attributes => ::attribute-map]
   (into {}
     (map (fn [{::keys [qualified-key] :as a}] [qualified-key a]))
     attributes))

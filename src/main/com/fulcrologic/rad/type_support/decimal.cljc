@@ -19,9 +19,15 @@
                    (java.text NumberFormat)
                    (java.util Locale))))
 
-(def ^:dynamic *primitive* false)
+(def rounding-modes {:down      #?(:cljs 0 :clj RoundingMode/DOWN)
+                     :half-up   #?(:cljs 1 :clj RoundingMode/HALF_UP)
+                     :half-even #?(:cljs 2 :clj RoundingMode/HALF_EVEN)
+                     :up        #?(:cljs 3 :clj RoundingMode/UP)})
 
-(declare * div + - < > <= >= max min bigdecimal numeric)
+(def ^:dynamic *primitive* false)
+(def ^:dynamic *default-rounding-mode* :half-up)
+
+(declare * div + - < > <= >= max min numeric)
 
 (defn bigdecimal? [v]
   #?(:clj  (decimal? v)
@@ -93,20 +99,29 @@
   [any? => boolean?]
   (not (positive? v)))
 
-(defn numeric->currency-str [n]
-  #?(:clj
-     (.format (NumberFormat/getCurrencyInstance (Locale. "en" "US")) (numeric n))
-     :cljs
-     (when n
-       (let [n         (js/parseFloat (numeric->str (numeric n)))
-             negative? (neg? n)
-             n         (if negative? (clojure.core/* -1 n) n)
-             result    (.toLocaleString n "en-US" #js {:style "currency" :currency "USD"})]
-         (if negative?
-           (str "-" result)
-           result)))))
+(defn numeric->currency-str
+  "DEPRECATED: Use fulcro i18n support with something like js/Intl instead. js-joda locales are no longer the way to go,
+   and this is not really a concern of numerics themselves.
 
-(defn numeric->percent-str [n]
+   Convert a numeric into a locale-specific currency string. The defaults are `en`, `US`, and `USD`."
+  ([n]
+   (numeric->currency-str n "en" "US" "USD"))
+  ([n language country currency-code]
+   #?(:clj
+      (.format (NumberFormat/getCurrencyInstance (Locale. language country)) (numeric n))
+      :cljs
+      (when n
+        (let [n         (js/parseFloat (numeric->str (numeric n)))
+              negative? (neg? n)
+              n         (if negative? (clojure.core/* -1 n) n)
+              result    (.toLocaleString n (str language "-" country) #js {:style "currency" :currency currency-code})]
+          (if negative?
+            (str "-" result)
+            result))))))
+
+(defn numeric->percent-str
+  "DEPRECATED: Use localization functions from i18n or js/Intl. This functions should never have been added here."
+  [n]
   #?(:clj
      (let [formatter (NumberFormat/getPercentInstance (Locale. "en" "US"))]
        (.setMaximumFractionDigits formatter 3)
@@ -115,8 +130,11 @@
      (when n
        (str (numeric->str (* n (numeric 100))) "%"))))
 
-(defn- n->big
-  "Convert a number-like thing into a low-level js Big representation."
+(defn n->big
+  "Convert a number-like thing into a low-level js Big representation.
+
+  WARNING: This is a low-level operation that should only be used if implementing your own extended functions for
+  math."
   [n]
   (cond
     (numeric? n)
@@ -131,8 +149,11 @@
     #?(:clj  (numeric "0")
        :cljs (Big. "0"))))
 
-(defn- big->bigdec
-  "Convert a low-level js Big number into a bigdecimal."
+(defn big->bigdec
+  "Convert a low-level js Big number into a bigdecimal. No-op in CLJ.
+
+  WARNING: This is a low-level operation that should only be used if implementing your own extended functions for
+  math."
   [n]
   #?(:clj  n
      :cljs (numeric (.toString n))))
@@ -262,20 +283,23 @@
 
 (defn round
   "Round the given number to the given number of
-  decimal digits. Returns a new bigdecimal number.
+  decimal digits. Returns a new bigdecimal number. The rounding mode default to :half-up, but can also
+  be :up, :down, or :half-even.  You can change the default rounding mode via the dynamic var *default-rounding-mode*.
 
   n can be nil (returns 0), a numeric string, a regular number, or a bigdecimal."
-  [n decimal-digits]
-  (if *primitive*
-    #?(:clj
-       (double (.setScale (bigdec (n->big n)) decimal-digits RoundingMode/HALF_UP))
-       :cljs
-       (js/parseFloat (.toFixed (numeric n) decimal-digits)))
-    (big->bigdec
-      #?(:clj
-         (.setScale (n->big n) decimal-digits RoundingMode/HALF_UP)
-         :cljs
-         (.toFixed (n->big n) decimal-digits)))))
+  ([n decimal-digits] (round n decimal-digits *default-rounding-mode*))
+  ([n decimal-digits rounding-mode]
+   (let [mode (get rounding-modes rounding-mode (get rounding-modes *default-rounding-mode*))]
+     (if *primitive*
+       #?(:clj
+          (double (.setScale (bigdec (n->big n)) ^int decimal-digits ^RoundingMode mode))
+          :cljs
+          (.toNumber (.round (n->big n) decimal-digits mode)))
+       (big->bigdec
+         #?(:clj
+            (.setScale ^BigDecimal (n->big n) ^int decimal-digits ^RoundingMode mode)
+            :cljs
+            (.round (n->big n) decimal-digits mode)))))))
 
 (defn negative
   "If n is positive then returns n*(-1) else returns n."
@@ -310,10 +334,28 @@
                         (-write writer (str "#" type " \"" v "\""))))))
 
 #?(:cljs
-   (reader/register-tag-parser! 'math/bigdec bigdecimal))
+   (reader/register-tag-parser! 'math/bigdec numeric))
+
+;; In cljs, at least, we can make `compare` work via this protocol.
+;; FIXME: This should be a more general function in transit support, since it tries to add comparison for transit tagged
+;; types.
+#?(:cljs
+   (extend-protocol cljs.core/IComparable
+     ty/TaggedValue
+     (-compare [a ^ty/TaggedValue b]
+       (if (and (numeric? a) (numeric? b))
+         (cond
+           (< a b) -1
+           (> a b) 1
+           (= a b) 0)
+         (compare (.-rep a) (.-rep b))))))
 
 (defn floor
   "Returns the floor of n, which is n with all decimal digits removed."
   [n]
   (let [v (str/replace (numeric->str (numeric n)) #"[.].*" "")]
     (numeric v)))
+
+(defn numeric->double [n]
+  #?(:clj  (Double/parseDouble (numeric->str n))
+     :cljs (js/parseFloat (numeric->str n))))

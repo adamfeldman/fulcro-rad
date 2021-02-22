@@ -3,7 +3,6 @@
   (:require
     [clojure.spec.alpha :as s]
     [clojure.set :as set]
-    [com.fulcrologic.rad.type-support.cache-a-bools :as cb]
     [clojure.string :as str]
     [com.fulcrologic.fulcro.algorithms.tempid :as tempid]
     [com.fulcrologic.fulcro.algorithms.do-not-use :refer [deep-merge]]
@@ -19,7 +18,6 @@
     [com.fulcrologic.rad.control :as control]
     [com.fulcrologic.rad.errors :refer [required!]]
     [com.fulcrologic.rad.attributes :as attr]
-    [com.fulcrologic.rad.authorization :as auth]
     [com.fulcrologic.rad.application :as rapp]
     [com.fulcrologic.rad.ids :as ids :refer [new-uuid]]
     [com.fulcrologic.rad.type-support.integer :as int]
@@ -29,12 +27,12 @@
     [taoensso.encore :as enc]
     [taoensso.timbre :as log]
     #?@(:clj  [[cljs.analyzer :as ana]]
-        :cljs [[cognitect.transit :as ct]
-               [goog.object :as gobj]])
+        :cljs [[goog.object :as gobj]])
     [com.fulcrologic.rad.options-util :as opts :refer [?! narrow-keyword]]
     [com.fulcrologic.rad.picker-options :as picker-options]
     [com.fulcrologic.fulcro.routing.dynamic-routing :as dr]
     [com.fulcrologic.rad.routing :as rad-routing]
+    [com.fulcrologic.fulcro-i18n.i18n :refer [tr]]
     [com.fulcrologic.rad.routing.history :as history]))
 
 (def view-action "view")
@@ -53,11 +51,11 @@
                      (let [props           (comp/props this)
                            read-only-form? (?! (comp/component-options this ::read-only?) this)
                            dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
-                       (if dirty? "Cancel" "Done")))
+                       (if dirty? (tr "Cancel") (tr "Done"))))
            :class  (fn [this]
                      (let [props  (comp/props this)
                            dirty? (or (:ui/new? props) (fs/dirty? props))]
-                       (if dirty? "negative" "positive")))
+                       (if dirty? "ui tiny primary button negative" "ui tiny primary button positive")))
            :action (fn [this] (cancel! {::master-form this}))}
    ::undo {:type      :button
            :disabled? (fn [this]
@@ -65,7 +63,7 @@
                               read-only-form? (?! (comp/component-options this ::read-only?) this)
                               dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
                           (not dirty?)))
-           :label     "Undo"
+           :label     (fn [_] (tr "Undo"))
            :action    (fn [this] (undo-all! {::master-form this}))}
    ::save {:type      :button
            :disabled? (fn [this]
@@ -74,11 +72,11 @@
                               remote-busy?    (seq (::app/active-remotes props))
                               dirty?          (if read-only-form? false (or (:ui/new? props) (fs/dirty? props)))]
                           (or (not dirty?) remote-busy?)))
-           :label     "Save"
+           :label     (fn [_] (tr "Save"))
            :class     (fn [this]
                         (let [props        (comp/props this)
                               remote-busy? (seq (::app/active-remotes props))]
-                          (when remote-busy? "loading")))
+                          (when remote-busy? "ui tiny primary button loading")))
            :action    (fn [this] (save! {::master-form this}))}})
 
 
@@ -160,14 +158,16 @@
   The attribute style of :default is the default, and can be overridden in ::form/field-styles on the form (master
   has precedence, followed by the form it actually appears on) or
   using ::form/field-style on the attribute itself."
-  [{::keys [form-instance master-form]} {::attr/keys [type qualified-key]
+  [{::keys [form-instance master-form]} {::attr/keys [type qualified-key style]
                                          ::keys      [field-style] :as attr}]
   (let [{::app/keys [runtime-atom]} (comp/any->app form-instance)
-        field-style (or
-                      (some-> master-form comp/component-options ::field-styles qualified-key)
-                      (some-> form-instance comp/component-options ::field-styles qualified-key)
-                      field-style
-                      :default)
+        field-style (?! (or
+                          (some-> master-form comp/component-options ::field-styles qualified-key)
+                          (some-> form-instance comp/component-options ::field-styles qualified-key)
+                          field-style
+                          style
+                          :default)
+                      form-instance)
         control-map (some-> runtime-atom deref ::rad/controls ::type->style->control)
         control     (or
                       (get-in control-map [type field-style])
@@ -296,7 +296,7 @@
   ([app id form-class] (start-form! app id form-class {}))
   ([app id form-class params]
    (let [{::attr/keys [qualified-key type]} (comp/component-options form-class ::id)
-         machine    (or (::machine form-class) form-machine)
+         machine    (or (comp/component-options form-class ::machine) form-machine)
          new?       (tempid/tempid? id)
          form-ident [qualified-key id]]
      (uism/begin! app machine
@@ -328,11 +328,12 @@
 
 (defn form-allow-route-change [this]
   "Used as a form route target's :allow-route-change?"
-  (let [id         (comp/get-ident this)
-        form-props (comp/props this)
-        read-only? (?! (comp/component-options this ::read-only?) this)
-        abandoned? (not= :state/editing (uism/get-active-state this id))
-        dirty?     (and (not abandoned?) (fs/dirty? form-props))]
+  (let [id            (comp/get-ident this)
+        form-props    (comp/props this)
+        read-only?    (?! (comp/component-options this ::read-only?) this)
+        current-state (app/current-state this)
+        abandoned?    (get-in current-state [::uism/asm-id id ::uism/local-storage :abandoned?] false)
+        dirty?        (and (not abandoned?) (fs/dirty? form-props))]
     (or read-only? (not dirty?))))
 
 (defn form-pre-merge
@@ -364,7 +365,8 @@
   [get-class location options]
   (required! location options ::attributes vector?)
   (required! location options ::id attr/attribute?)
-  (let [{::keys [id attributes route-prefix query-inclusion]} options
+  (let [{::keys [id attributes route-prefix query-inclusion]
+         :keys  [will-enter]} options
         id-key                     (::attr/qualified-key id)
         form-field?                (fn [{::attr/keys [identity? computed-value]}] (and
                                                                                     (not computed-value)
@@ -377,8 +379,9 @@
                                       ::control/controls standard-controls
                                       :route-denied      (fn [this relative-root proposed-route]
                                                            #?(:cljs
-                                                              (when (js/confirm "You will lose unsaved changes. Are you sure?")
-                                                                (dr/retry-route! this relative-root proposed-route))))}
+                                                              (when-let [confirm (or (comp/component-options (get-class) ::confirm) js/confirm)]
+                                                                (when (confirm "You will lose unsaved changes. Are you sure?")
+                                                                  (dr/retry-route! this relative-root proposed-route)))))}
                                      options
                                      (cond->
                                        {:ident           (fn [_ props] [id-key (get props id-key)])
@@ -392,12 +395,16 @@
                                        route-prefix (merge {:route-segment       [route-prefix :action :id]
                                                             :allow-route-change? form-allow-route-change
                                                             :will-leave          (fn [this props] (form-will-leave this))
-                                                            :will-enter          (fn [app route-params] (form-will-enter app route-params (get-class)))})))
+                                                            :will-enter          (or will-enter
+                                                                                   (fn [app route-params]
+                                                                                     (form-will-enter app route-params (get-class))))})))
         inclusions                 (set/union attribute-query-inclusions (set query-inclusion))
         query                      (cond-> (form-options->form-query base-options)
                                      (seq inclusions) (into inclusions))]
     (when (and #?(:cljs goog.DEBUG :clj true) (not (string? route-prefix)))
       (log/info "NOTE: " location " does not have a route prefix and will only be usable as a sub-form."))
+    (when (and #?(:cljs goog.DEBUG :clj true) will-enter (not route-prefix))
+      (log/info "NOTE: There's a :will-enter option in form/defsc-form" location "that will be ignored because ::report/route-prefix is not specified"))
     (assoc base-options :query (fn [_] query))))
 
 #?(:clj
@@ -694,18 +701,22 @@
       (route-target-ready form-ident)
       (uism/activate :state/editing))))
 
-(defn exit-form
-  "Discard all changes, and attempt to change route. Exits the state machine (cleaning it up) if the new route takes effect."
+(defn leave-form
+  "Discard all changes, and attempt to change route."
   [{::uism/keys [fulcro-app] :as uism-env}]
   (let [Form         (uism/actor-class uism-env :actor/form)
-        cancel-route (some-> Form comp/component-options ::cancel-route)]
+        cancel-route (?! (some-> Form comp/component-options ::cancel-route))]
     (let [form-ident (uism/actor->ident uism-env :actor/form)]
-      (when (history/history-support? fulcro-app)
-        (history/back! fulcro-app))
+      (cond
+        (= :back cancel-route) (if (history/history-support? fulcro-app)
+                                 (history/back! fulcro-app)
+                                 (log/error "Back not supported. No history installed."))
+        (and (seq cancel-route) (every? string? cancel-route)) (dr/change-route! fulcro-app cancel-route)
+        (comp/component-class? cancel-route) (rad-routing/route-to! fulcro-app cancel-route {})
+        (history/history-support? fulcro-app) (history/back! fulcro-app))
       (-> uism-env
-        (uism/apply-action fs/pristine->entity* form-ident)
-        (uism/activate :state/abandoned)
-        (uism/set-timeout :cleanup :event/exit {} 1)))))
+        (uism/store :abandoned? true)
+        (uism/apply-action fs/pristine->entity* form-ident)))))
 
 (>defn calc-diff
   "Calculates the minimal form diff from the UISM env of the master form's state machine."
@@ -719,10 +730,14 @@
     {::delta delta}))
 
 (def global-events
-  {:event/exit
-   {::uism/handler (fn [env] (uism/exit env))}
-   :event/route-denied
-   {::uism/handler (fn [env] env)}})
+  {:event/exit          {::uism/handler (fn [env] (uism/exit env))}
+   :event/mark-complete {::uism/handler (fn [env]
+                                          (let [form-ident (uism/actor->ident env :actor/form)]
+                                            (uism/apply-action env fs/mark-complete* form-ident)))}
+   :event/route-denied  {::uism/handler (fn [env] env)}})
+
+(defn mark-all-complete! [master-form-instance]
+  (uism/trigger! master-form-instance (comp/get-ident master-form-instance) :event/mark-complete))
 
 (defn auto-create-to-one
   "Create any to-one referenced entities that did not load, but which are marked as auto-create."
@@ -829,7 +844,7 @@
     {::uism/events
      (merge
        global-events
-       {:event/ok     {::uism/handler exit-form}
+       {:event/ok     {::uism/handler leave-form}
         :event/cancel {::uism/handler (fn [env] (uism/activate env :state/editing))}})}
 
     :state/saving
@@ -945,12 +960,7 @@
                             (uism/apply-action env fs/pristine->entity* form-ident)))}
 
         :event/cancel
-        {::uism/handler (fn [env] (-> env
-                                    (uism/activate :state/abandoned)
-                                    (exit-form)))}})}
-
-    :state/abandoned
-    {::uism/events global-events}}})
+        {::uism/handler leave-form}})}}})
 
 (defn save!
   "Trigger a save on the given form rendering env."
@@ -1008,25 +1018,19 @@
   as you'd expect."
   [form-instance {::attr/keys [qualified-key identity? read-only? computed-value] :as attr}]
   [comp/component? ::attr/attribute => boolean?]
-  (cb/as-boolean
-    (cb/with-app-cache form-instance [::read-only? qualified-key]
-      (let [{::keys          [read-only-fields]
-             read-only-form? ::read-only?} (comp/component-options form-instance)
-            master-form       (comp/get-computed form-instance ::master-form)
-            master-read-only? (some-> master-form (comp/component-options ::read-only?))]
-        (cb/Or
-          (cb/Cnil (?! read-only-form? form-instance))
-          (cb/Cnil (?! master-read-only? master-form))
-          (and identity? cb/CT)
-          (cb/Cnil (?! read-only? form-instance attr))
-          (cb/Cnil computed-value)
-          (cb/Or
-            (cb/Not (cb/Cnil? read-only-fields))
-            (and (set? (?! read-only-fields form-instance)) (contains? read-only-fields qualified-key)))
-          ;; These answers need to be cached in a very fast way
-          (cb/Not (auth/can? form-instance {::auth/context form-instance
-                                            ::auth/subject `save-form
-                                            ::auth/action  :execute})))))))
+  (let [{::keys          [read-only-fields]
+         read-only-form? ::read-only?} (comp/component-options form-instance)
+        master-form       (comp/get-computed form-instance ::master-form)
+        master-read-only? (some-> master-form (comp/component-options ::read-only?))]
+    (boolean
+      (or
+        (?! read-only-form? form-instance)
+        (?! master-read-only? master-form)
+        identity?
+        (?! read-only? form-instance attr)
+        computed-value
+        (let [read-only-fields (?! read-only-fields form-instance)]
+          (and (set? read-only-fields) (contains? read-only-fields qualified-key)))))))
 
 (defn field-visible?
   "Should the `attr` on the given `form-instance` be visible? This is controlled:
@@ -1040,17 +1044,13 @@
   [form-instance {::keys      [field-visible?]
                   ::attr/keys [qualified-key] :as attr}]
   [comp/component? ::attr/attribute => boolean?]
-  (cb/as-boolean
-    (cb/with-app-cache form-instance [::field-visible? qualified-key]
-      (let [form-field-visible? (?! (comp/component-options form-instance ::fields-visible? qualified-key) form-instance attr)
-            field-visible?      (?! field-visible? form-instance attr)
-            answer              (cb/And
-                                  (auth/can? form-instance (auth/Read qualified-key {::form-instance form-instance}))
-                                  (cb/Or
-                                    form-field-visible?
-                                    (cb/And (cb/Cnil? form-field-visible?) field-visible?)
-                                    (cb/And (cb/Cnil? form-field-visible?) (cb/Cnil? field-visible?))))]
-        answer))))
+  (let [form-field-visible? (?! (comp/component-options form-instance ::fields-visible? qualified-key) form-instance attr)
+        field-visible?      (?! field-visible? form-instance attr)]
+    (boolean
+      (or
+        (true? form-field-visible?)
+        (and (nil? form-field-visible?) (true? field-visible?))
+        (and (nil? form-field-visible?) (nil? field-visible?))))))
 
 (defn view!
   "Route to the given form in read-only mode."
@@ -1171,7 +1171,7 @@
         field-label (?! (or
                           (get-in options [::field-labels k])
                           (::field-label attribute)
-                          (some-> k name str/capitalize)) form-instance)]
+                          (some-> k name str/capitalize (str/replace #"-" " "))) form-instance)]
     field-label))
 
 (defn invalid?
@@ -1212,8 +1212,7 @@
   then the result will be a deep merge of the two (with form winning)."
   [{::keys [form-instance]} attribute config-key]
   [::form-env ::attr/attribute keyword? => any?]
-  (let [{::attr/keys [qualified-key]
-         ::keys      [field-style-config]} attribute
+  (let [{::attr/keys [qualified-key field-style-config]} attribute
         form-value      (comp/component-options form-instance ::field-style-configs qualified-key config-key)
         attribute-value (get field-style-config config-key)]
     (if (and (map? form-value) (map? attribute-value))

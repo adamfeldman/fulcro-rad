@@ -84,8 +84,8 @@
   data. Does nothing by itself, must be used with :com.wsscode.pathom.connect/resolve, and optionally
   :com.wsscode.pathom.connect/input.
 
-  Attribute MUST be a `:ref` type and can include a `target` that indicates what kind of entities/rows/docs this attribute
-  resolves to.
+  If you are resolving a graph edge, then the attribute must be a `:ref` type and can include a `target`
+  that indicates what kind of entities/rows/docs this attribute resolves to.
 
   ```
   (defattr all-accounts :account/all-accounts :ref
@@ -96,10 +96,14 @@
                        {:account/all-accounts (queries/get-all-accounts env query-params)}))})
   ```
 
+  If you are resolving a scalar, then just specify the correct type.
+
   Remember that automatic resolver generation in database adapters will be able to resolve any other desired attributes
   of an entity/row/document based on the ID of it. Therefore a ref attribute like this will typically ONLY return the
   IDs of the items (though it may choose to return more if that case is judged to always be more efficient).
 
+  NOTE: Any pathom keys you'd normally put in a pathom resolver options
+  map can be included in an attribute that is used to generate a Pathom resolver.
   "
   :com.wsscode.pathom.connect/output)
 
@@ -113,7 +117,8 @@
 
   Must be used with :com.wsscode.pathom.connect/output, and optionally :com.wsscode.pathom.connect/input.
 
-  See `pc-output`.
+  See `pc-output`. Also note: Any pathom keys you'd normally put in a pathom resolver options
+   map can be included in an attribute that is used to generate a Pathom resolver.
   "
   :com.wsscode.pathom.connect/resolve)
 
@@ -143,12 +148,58 @@
    A completely virtual resolution like this can also simply be generated with Pathom's `defresolver`, but defining them
    in attributes means you can add additional info to them that is useful to other parts of RAD like form rendering.
 
-   See `pc-resolve` and `pc-output`.
+   See `pc-resolve` and `pc-output`. Also note: Any pathom keys you'd normally put in a pathom resolver options
+   map can be included in an attribute that is used to generate a Pathom resolver.
   "
   :com.wsscode.pathom.connect/input)
+
+(def pc-transform
+  "ALIAS to :com.wsscode.pathom.connect/transform.
+   See the pathom transform docs: https://blog.wsscode.com/pathom/#connect-transform
+
+   Allows one to specify a function that receives the full resolver/mutation map and returns the final version.
+
+   Generally used to wrap the resolver/mutation function with some generic operation to augment its data or operations.
+  "
+  :com.wsscode.pathom.connect/transform)
 
 (def read-only?
   "Boolean or `(fn [form-instance attribute] boolean?)`. If true it indicates to the form and db layer that writes
    of this value should not be allowed.  Enforcement is an optional feature. See you database adapter and rendering
    plugin for details."
   :com.fulcrologic.rad.attributes/read-only?)
+
+(def style
+  "A keyword or `(fn [context] keyword)`, where context will typically be a component instance that is attempting
+   to apply the style.
+
+   Indicates the general style for formatting this particular attribute in forms and reports. Forms
+   and reports include additional more fine-grained options for customizing formatting, but this setting
+   can be used as a hint to all plugins and libraries as to how you'd like the value to be styled.
+
+   Examples that might be defined include `:USD`, `:password`, `:currency`, etc. Support for this attribute
+   will depend on the specific RAD artifact, and may have no effect at all."
+  :com.fulcrologic.rad.attributes/style)
+
+(def field-style-config
+  "A map of options that are used by the rendering plugin to augment the style of a rendered input.
+  Such configuration options are really up to the render plugin, but could include things like `:input/props` as
+  additional DOM k/v pairs to put on the input."
+  :com.fulcrologic.rad.attributes/field-style-config)
+
+(def computed-options
+  "A vector of {:text/:value} maps that indicate the options available for an attribute's value,
+  which may be dependent on other attributes of the entity (e.g. to populate a cascading dropdown). This can also be a
+  (fn [env] [{:text ... :value ...} ...]), where `env` is defined by the context of usage (for example in a form
+  this will be the form-env which contains the master form and current form instance, allowing you to examine the
+  entire nested form).
+
+  Various plugins *may* support this option in various ways, so see the documentation of your
+  UI/database plugin for more information. You must ensure that `:text` is always a string, and
+  that your `:value` is a legal value of the attribute.
+
+  Generally this option will do nothing unless a renderer supports it directly.
+
+  For example: The Semantic UI Rendering plugin supports this option on strings and other types when you set
+  `ao/style` to :picker."
+  :com.fulcrologic.rad.attributes/computed-options)
